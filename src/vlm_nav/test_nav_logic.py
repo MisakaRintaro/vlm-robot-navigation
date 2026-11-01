@@ -4,16 +4,12 @@ import pytest
 
 from nav_logic import (
     build_prompt,
-    build_sweep_prompt,
     heading_error,
-    heading_to_capture,
     most_open_direction,
     open_directions,
     normalize_angle,
-    parse_sweep,
     parse_target,
     sector_distance,
-    target_bearing,
     yaw_from_quaternion,
 )
 
@@ -51,15 +47,6 @@ def test_heading_error_is_positive_for_target_on_left():
 
 def test_heading_error_is_negative_for_target_on_right():
     assert heading_error(1.0, hfov_deg=60) == pytest.approx(math.radians(-30))
-
-
-def test_target_bearing_adds_camera_pan():
-    # 首を右に 60° 振った画像の中央に目標 → 車体は右に 60°（右回りは負）
-    assert target_bearing(pan_deg=60, x=0.5, hfov_deg=60) == pytest.approx(math.radians(-60))
-
-
-def test_target_bearing_with_center_pan_equals_heading_error():
-    assert target_bearing(pan_deg=0, x=0.0, hfov_deg=60) == pytest.approx(math.radians(30))
 
 
 # --- LiDAR の方向別の距離 ---
@@ -161,41 +148,7 @@ def test_normalize_angle_wraps_across_180_degrees():
     assert diff == pytest.approx(math.radians(2))
 
 
-# --- まとめて送る探索（スイープ） ---
-
-def test_parse_sweep_returns_image_index_and_position():
-    text = '```json\n{"image": 3, "point": [500, 250]}\n```'
-    assert parse_sweep(text) == (3, 0.25, 0.5)
-
-
-def test_parse_sweep_returns_none_when_not_found():
-    assert parse_sweep('{}') is None
-
-
-def test_parse_sweep_returns_none_for_unreadable_answer():
-    assert parse_sweep('not found') is None
-
-
-def test_heading_to_capture_accounts_for_rotation_since_capture():
-    # 撮影時は今より左に 90° 向いていた。その画像の中央・首は正面 → 左に 90° 回る
-    turn = heading_to_capture(capture_yaw=math.radians(90), current_yaw=0.0,
-                              pan_deg=0, x=0.5, hfov_deg=60)
-    assert turn == pytest.approx(math.radians(90))
-
-
-def test_heading_to_capture_wraps_to_shortest_turn():
-    # 撮影時の向き 170°、今 -170° → 左に 340° ではなく右に 20° 回る
-    turn = heading_to_capture(capture_yaw=math.radians(170), current_yaw=math.radians(-170),
-                              pan_deg=0, x=0.5, hfov_deg=60)
-    assert turn == pytest.approx(math.radians(-20))
-
-
 # --- プロンプト ---
 
 def test_build_prompt_contains_target():
     assert 'pink tape' in build_prompt('pink tape')
-
-
-def test_build_sweep_prompt_contains_target_and_image_count():
-    prompt = build_sweep_prompt('pink tape', 12)
-    assert 'pink tape' in prompt and '12' in prompt

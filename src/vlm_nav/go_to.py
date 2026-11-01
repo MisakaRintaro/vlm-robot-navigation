@@ -26,15 +26,12 @@ from std_msgs.msg import Int32, String, UInt16
 import config
 from nav_logic import (
     build_prompt,
-    build_sweep_prompt,
-    heading_to_capture,
+    heading_error,
     most_open_direction,
-    open_directions,
     normalize_angle,
-    parse_sweep,
+    open_directions,
     parse_target,
     sector_distance,
-    target_bearing,
     yaw_from_quaternion,
 )
 from recorder import RunRecorder
@@ -234,12 +231,14 @@ class GoTo(Node):
         self.get_logger().warning(f'{STOP_TIMEOUT} 秒以内に停止を確認できませんでした')
 
     def set_camera(self, pan_deg: float, tilt_deg: float = config.CAMERA_TILT_LOOK_DEG):
-        """カメラを首振り pan_deg、うなずき tilt_deg に向ける（初期値は見るときの角度）。"""
-        # 1通では届かないことがあるため繰り返す（角度指定なので何回送っても結果は同じ）
-        for _ in range(3):
-            self.servo_pubs[0].publish(Int32(data=int(pan_deg)))
-            self.servo_pubs[1].publish(Int32(data=int(tilt_deg)))
-            time.sleep(0.05)
+        """カメラを首振り pan_deg（車体の正面が 0°、右が正）、うなずき tilt_deg に向ける。"""
+        # 1通では届かないことがあるため繰り返す（角度指定なので何回送っても結果は同じ）。
+        # 首振りとうなずきを交互に素早く送ると首振りが反映されないことがあったため、別々に間隔をあけて送る
+        pan_cmd = int(pan_deg + config.PAN_OFFSET_DEG)  # サーボの 0° は正面からずれているので補正値を足す
+        for pub, value in ((self.servo_pubs[0], pan_cmd), (self.servo_pubs[1], int(tilt_deg))):
+            for _ in range(3):
+                pub.publish(Int32(data=value))
+                time.sleep(0.1)
         self.pan, self.tilt = pan_deg, tilt_deg
         self.spin_for(0.5)  # サーボが動き終わり、新しい画像・LiDAR の値が届くのを待つ
 
@@ -306,45 +305,37 @@ class GoTo(Node):
         self.spin_for(0.3)  # 問い合わせ中に止まっていた受信処理を進め、センサ値を更新する
         if target is None:
             return None
-        return target_bearing(0, target[0], config.CAMERA_HFOV_DEG), target[1], tilt_deg
+        return heading_error(target[0], config.CAMERA_HFOV_DEG), target[1], tilt_deg
 
-    def sweep(self, kind: str, turn_deg: float, pans: list, tilts: list) -> tuple[float, float, float] | None:
-        """車体を一周させながらカメラを振って画像を撮りため、まとめて1回で目標を探す。
+    def scan_around(self, kind: str, turn_deg: float, tilts: list, start_with_turn: bool):
+        """車体を少しずつ回しながら、各向きで正面の画像を1枚ずつ AI に送って目標を探す。
+
+        見つかった時点で止まる。目標は「今の正面の画像の中」にあるので、向きの計算に
+        撮影時の首振り角や旋回の積み重ねを使わずに済む（首振りサーボは今の角度を報告せず、
+        首振りが画像に反映されないことがあったため、首は正面に固定する）。
 
         Args:
-            kind: 記録用の名前（"sweep"：粗い一周撮影、"detail"：詳細探索）。
-            turn_deg: 撮影のたびに車体を回す角度 [deg]。
-            pans: 各向きでの首振り角 [deg] のリスト。
-            tilts: 各向きでのうなずき角 [deg] のリスト。
+            kind: 記録用の名前（"sweep"：一周撮影、"detail"：詳細探索）。
+            turn_deg: 次の向きへ回る角度 [deg]。カメラの視野角より小さくして、隙間をなくす。
+            tilts: 各向きで試すうなずき角 [deg] のリスト。
+            start_with_turn: 最初に回ってから見るか（今の向きをすでに見ている場合は True）。
 
         Returns:
-            look() と同じ。見つからなければ None。
+            look() と同じ。一周しても見つからなければ None。
         """
-        captures = []  # (画像, 撮影時の車体の向き, 首振り角, うなずき角)
         turns = round(360 / turn_deg)
         for i in range(turns):
-            for tilt in tilts:
-                for pan in pans:
-                    self.set_camera(pan, tilt)
-                    captures.append((self.fresh_image(), self.yaw(), pan, tilt))
-            if i < turns - 1:
+            if i > 0 or start_with_turn:
                 self.turn(math.radians(turn_deg))
-        self.set_camera(0)
-
-        answer = self.ask_gemini([c[0] for c in captures],
-                                 build_sweep_prompt(self.target, len(captures)))
-        found = None if answer is None else parse_sweep(answer)
-        for k, (jpeg, _, _, _) in enumerate(captures):
-            hit = found is not None and found[0] == k
-            self.save_image(f'{self.queries:03d}_{k:02d}', jpeg, found[1:] if hit else None)
-        self.event(kind, query=self.queries, images=len(captures), answer=answer, found=found,
-                   latency=round(time.monotonic() - self.last_query_time, 2))
-        self.spin_for(0.3)
-        if found is None or not 0 <= found[0] < len(captures):
-            return None
-        _, capture_yaw, pan, tilt = captures[found[0]]
-        bearing = heading_to_capture(capture_yaw, self.yaw(), pan, found[1], config.CAMERA_HFOV_DEG)
-        return bearing, found[2], tilt
+            for tilt in tilts:
+                found = self.look(tilt)
+                if found is not None:
+                    self.event(kind, step=i, tilt_deg=tilt, found=True)
+                    return found
+            if self.queries >= config.MAX_QUERIES:
+                break
+        self.event(kind, steps=turns, found=False)
+        return None
 
     # --- 全体の手順 ---
 
@@ -446,15 +437,16 @@ class GoTo(Node):
                     tracking, details = False, 0
                     continue
                 details += 1
-                found = self.sweep('detail', config.DETAIL_TURN_DEG,
-                                   config.DETAIL_PANS_DEG, config.DETAIL_TILTS_DEG)
+                found = self.scan_around('detail', config.DETAIL_TURN_DEG, config.DETAIL_TILTS_DEG,
+                                  start_with_turn=False)
                 if found is None:
                     if not self.explore(config.DETAIL_MOVE_DISTANCE):
                         return
                     continue
             elif found is None:
-                found = self.sweep('sweep', config.SWEEP_TURN_DEG,
-                                   config.SWEEP_PANS_DEG, config.SWEEP_TILTS_DEG)
+                # 正面はすでに見たので、回ってから見始める
+                found = self.scan_around('sweep', config.SWEEP_TURN_DEG, config.SWEEP_TILTS_DEG,
+                                  start_with_turn=True)
                 if found is None:
                     if not self.explore(config.EXPLORE_DISTANCE):
                         return

@@ -21,45 +21,6 @@ def build_prompt(target: str) -> str:
     )
 
 
-def build_sweep_prompt(target: str, count: int) -> str:
-    """複数の画像から目標を探させるプロンプトを作る。
-
-    Args:
-        target: 目標を表す言葉。
-        count: 一緒に送る画像の枚数。画像は送った順に 0 から番号が付く。
-
-    Returns:
-        画像と一緒に送るプロンプト。答えは {"image": 番号, "point": [y, x]}、見つからなければ {}。
-    """
-    return (
-        f'You are given {count} images, numbered 0 to {count - 1} in order. '
-        f'Find the {target}. '
-        'Answer in JSON: {"image": <number>, "point": [y, x]} for the image where it is most clearly visible. '
-        'Points are [y, x] normalized to 0-1000. '
-        'If it is not visible in any image, answer {}.'
-    )
-
-
-def parse_sweep(text: str) -> tuple[int, float, float] | None:
-    """複数画像の探索に対する Gemini の答えから、どの画像のどこにあるかを取り出す。
-
-    Args:
-        text: Gemini の答え。```json で囲まれていてもよい。
-
-    Returns:
-        (画像の番号, x, y)。x, y は画像の左上 (0, 0)・右下 (1, 1)。見つからない・読み取れない場合は None。
-    """
-    match = re.search(r'\{.*\}', text, re.DOTALL)
-    if match is None:
-        return None
-    try:
-        answer = json.loads(match.group(0))
-        y, x = answer['point']
-        return int(answer['image']), x / 1000, y / 1000
-    except (ValueError, LookupError, TypeError):
-        return None
-
-
 def parse_target(text: str) -> tuple[float, float] | None:
     """Gemini の答えから、目標の画像上の位置を取り出す。
 
@@ -93,38 +54,6 @@ def heading_error(x: float, hfov_deg: float) -> float:
         旋回角度 [rad]。REP 103 に従い、左回りが正。
     """
     return math.radians((0.5 - x) * hfov_deg)
-
-
-def target_bearing(pan_deg: float, x: float, hfov_deg: float) -> float:
-    """首振りの角度と画像の横位置から、目標の方向（車体の正面から見た角度）を求める。
-
-    Args:
-        pan_deg: 撮影したときの首振りサーボ S1 の角度 [deg]。実機では右が正。
-        x: 目標の横位置（左端 0、右端 1）。
-        hfov_deg: カメラの水平視野角 [deg]。
-
-    Returns:
-        車体を目標に向けるための旋回角度 [rad]。REP 103 に従い、左回りが正。
-    """
-    # サーボは右が正、ROS の角度は左が正なので符号を反転する
-    return math.radians(-pan_deg) + heading_error(x, hfov_deg)
-
-
-def heading_to_capture(capture_yaw: float, current_yaw: float, pan_deg: float,
-                       x: float, hfov_deg: float) -> float:
-    """以前に撮った画像に写っていた目標へ、今の向きから回る角度を求める。
-
-    Args:
-        capture_yaw: 撮影したときの車体の向き [rad]（オドメトリ）。
-        current_yaw: 今の車体の向き [rad]。
-        pan_deg: 撮影したときの首振りサーボ S1 の角度 [deg]。右が正。
-        x: その画像での目標の横位置（左端 0、右端 1）。
-        hfov_deg: カメラの水平視野角 [deg]。
-
-    Returns:
-        旋回角度 [rad]。左回りが正。回る量が少ない向き（-π〜π）を選ぶ。
-    """
-    return normalize_angle(capture_yaw + target_bearing(pan_deg, x, hfov_deg) - current_yaw)
 
 
 def sector_distance(ranges, angle_min: float, angle_increment: float, center_deg: float,
