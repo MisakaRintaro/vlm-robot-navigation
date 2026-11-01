@@ -1,0 +1,60 @@
+# Yahboom MicroROS-ESP32 ロボットを WSL2(mirrored) + Docker から操作する構成
+# 全サービスで host ネットワーク/IPC を共有し、DDS の通信をホスト内で完結させる
+x-ros-common: &ros-common
+  network_mode: host
+  ipc: host
+  environment: &ros-env
+    # ロボット側(config_robot.py)の設定値と一致させる
+    ROS_DOMAIN_ID: "20"
+
+# micro-ROS Agent 共通の設定
+x-agent-env: &agent-env
+  <<: *ros-env
+  # 公式イメージは既定で共有メモリ(SHM)を無効にし、ros コンテナとは UDP(127.0.0.1) で通信する。
+  # WSL2 mirrored のループバックは 1472 バイトを超える UDP を捨てるため、/scan やカメラ画像が届かない。
+  # SHM を有効にして、同じ PC 内の通信をループバックに通さない
+  MICROROS_DISABLE_SHM: "0"
+
+services:
+  # 制御ボード(ESP32)用 Agent: ロボットがこのポートへ WiFi/UDP で接続してくる
+  agent:
+    <<: *ros-common
+    image: microros/micro-ros-agent:humble
+    environment: *agent-env
+    command: udp4 --port 8090 -v4
+
+  # ROS-WiFi カメラモジュール用 Agent
+  camera-agent:
+    <<: *ros-common
+    image: microros/micro-ros-agent:humble
+    environment: *agent-env
+    command: udp4 --port 9999 -v4
+
+  # ROS 2 コマンドや自作ノードを実行するコンテナ
+  ros:
+    <<: *ros-common
+    build: ./docker
+    image: pai-robot:humble
+    # Gemini の API キー（GEMINI_API_KEY）。.env は Git に含めない
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      <<: *ros-env
+      # GUI（rqt / rviz2）を WSLg の画面に表示する
+      DISPLAY: ":0"
+      WAYLAND_DISPLAY: wayland-0
+      XDG_RUNTIME_DIR: /mnt/wslg/runtime-dir
+    volumes:
+      - ./src:/ws/src
+      # 実行記録（AI に送った画像・判断のログ・rosbag）の保存先
+      - ./runs:/ws/runs
+      # WSLg の X11 / Wayland ソケット
+      - /mnt/wslg/.X11-unix:/tmp/.X11-unix
+      - /mnt/wslg:/mnt/wslg
+    stdin_open: true
+    tty: true
+    # 起動時に ros2 daemon を明示的に立ち上げておく。
+    # WSL2 mirrored では未使用の 127.0.0.1 ポートへの接続が「拒否」でなく「タイムアウト」になり、
+    # ros2 CLI の daemon 自動起動が失敗する（TimeoutError: [Errno 110]）ため
+    command: bash -c "source /opt/ros/humble/setup.bash && ros2 daemon start && exec bash"

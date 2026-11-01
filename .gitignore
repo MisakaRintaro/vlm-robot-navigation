@@ -1,0 +1,23 @@
+# 講義資料は二次配布禁止のため公開リポジトリに含めない
+doc/
+
+# colcon の生成物
+build/
+install/
+log/
+
+# 作業用の引き継ぎメモ（LAN 構成などローカル情報を含むため公開しない）
+HANDOFF.md
+
+# Python のキャッシュ
+__pycache__/
+.pytest_cache/
+
+# API キーなどの秘密情報
+.env
+
+# 実行記録（画像・rosbag）。レポートに使うものだけ別途コピーする
+runs/
+
+# Claude Code のローカル設定
+.claude/settings.local.json
